@@ -11,68 +11,168 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Resolve Reddit share link and print thesis
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
           SHARE_URL='https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
-          UA='Mozilla/5.0 (compatible; EquityResearchResolver/1.0; +https://github.com/JG-CSI-Velocity/random-work)'
-
-          FINAL_URL=$(curl -A "$UA" -sS -L --max-redirs 10 -o /tmp/reddit.html -w '%{url_effective}' "$SHARE_URL")
-          echo "FINAL_URL=$FINAL_URL"
-          echo '--- REDIRECT HEADERS ---'
-          curl -A "$UA" -sS -I -L --max-redirs 10 "$SHARE_URL" || true
-          echo '--- END REDIRECT HEADERS ---'
-
-          POST_ID=$(printf '%s' "$FINAL_URL" | sed -nE 's#.*?/comments/([a-z0-9]+)/.*#\1#p')
-          echo "POST_ID=$POST_ID"
-          if [ -z "$POST_ID" ]; then
-            echo 'Could not extract a Reddit post ID.'
-            echo '--- HTML HEAD ---'
-            head -c 10000 /tmp/reddit.html || true
-            exit 1
-          fi
-
-          JSON_URL="https://www.reddit.com/comments/${POST_ID}.json?raw_json=1&limit=500&depth=10"
-          HTTP_CODE=$(curl -A "$UA" -sS -L -o /tmp/post.json -w '%{http_code}' "$JSON_URL")
-          echo "JSON_URL=$JSON_URL"
-          echo "JSON_HTTP_CODE=$HTTP_CODE"
+          ENCODED_URL='https%3A%2F%2Fwww.reddit.com%2Fr%2FValueInvesting%2Fs%2FubqCGz21VM'
 
           python3 - <<'PY'
-          import json, pathlib, sys
-          path = pathlib.Path('/tmp/post.json')
-          raw = path.read_text(errors='replace') if path.exists() else ''
-          print('--- JSON PREVIEW ---')
-          print(raw[:2000])
-          print('--- END JSON PREVIEW ---')
-          try:
-              data = json.loads(raw)
-          except Exception as exc:
-              print(f'JSON_PARSE_ERROR={exc}')
-              sys.exit(1)
+          import html, json, re, sys, urllib.parse, urllib.request
 
-          post = data[0]['data']['children'][0]['data']
-          print('--- POST METADATA ---')
-          for key in ('title','author','subreddit','created_utc','score','num_comments','permalink','url','link_flair_text'):
-              print(f'{key.upper()}={post.get(key)}')
-          print('--- POST BODY ---')
-          print(post.get('selftext',''))
-          print('--- END POST BODY ---')
+          share = 'https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
+          variants = [
+              share,
+              share.replace('www.reddit.com','reddit.com'),
+              share.replace('www.reddit.com','old.reddit.com'),
+              share.replace('www.reddit.com','new.reddit.com'),
+              share.replace('www.reddit.com','np.reddit.com'),
+              share.replace('www.reddit.com','m.reddit.com'),
+              share + '.json',
+              share + '?raw_json=1',
+              'https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM',
+              'https://www.redditmedia.com/r/ValueInvesting/s/ubqCGz21VM',
+              'https://r.jina.ai/http://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM',
+              'https://r.jina.ai/https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM',
+              'https://api.microlink.io/?url=' + urllib.parse.quote(share, safe=''),
+              'https://www-reddit-com.translate.goog/r/ValueInvesting/s/ubqCGz21VM?_x_tr_sl=auto&_x_tr_tl=en&_x_tr_hl=en',
+          ]
+          user_agents = [
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+              'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Chrome/140.0 Mobile Safari/537.36',
+              'Googlebot/2.1 (+http://www.google.com/bot.html)',
+              'Reddit/Version 2026.32.0/Build 200000/Android 15',
+          ]
 
-          print('--- TOP-LEVEL COMMENTS ---')
-          comments = data[1]['data']['children']
-          def walk(children, depth=0):
-              for child in children:
-                  if child.get('kind') != 't1':
-                      continue
-                  c = child.get('data', {})
-                  body = c.get('body', '')
-                  print(f"COMMENT depth={depth} score={c.get('score')} author={c.get('author')}: {body}")
-                  replies = c.get('replies')
-                  if isinstance(replies, dict):
-                      walk(replies.get('data', {}).get('children', []), depth+1)
-          walk(comments)
-          print('--- END COMMENTS ---')
+          patterns = [
+              re.compile(r'https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\\ ]+', re.I),
+              re.compile(r'/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\\ ]+', re.I),
+              re.compile(r'"(?:canonicalUrl|permalink|url|redirect|location|targetUrl|destination)"\s*:\s*"([^"]+)"', re.I),
+              re.compile(r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)', re.I),
+              re.compile(r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)', re.I),
+          ]
+
+          found = []
+          for idx, url in enumerate(variants):
+              for ua_idx, ua in enumerate(user_agents[:1] if idx >= 8 else user_agents):
+                  req = urllib.request.Request(url, headers={
+                      'User-Agent': ua,
+                      'Accept': 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+                      'Accept-Language': 'en-US,en;q=0.9',
+                  })
+                  try:
+                      with urllib.request.urlopen(req, timeout=20) as resp:
+                          body = resp.read(2_000_000).decode('utf-8','replace')
+                          final = resp.geturl()
+                          status = getattr(resp, 'status', None)
+                  except Exception as exc:
+                      body = ''
+                      final = ''
+                      status = f'ERR:{type(exc).__name__}:{exc}'
+                      if hasattr(exc, 'read'):
+                          try:
+                              body = exc.read(2_000_000).decode('utf-8','replace')
+                          except Exception:
+                              pass
+                      if hasattr(exc, 'geturl'):
+                          try: final = exc.geturl()
+                          except Exception: pass
+                  print(f'TRY idx={idx} ua={ua_idx} status={status} final={final} bytes={len(body)} url={url}')
+                  candidates = []
+                  if final: candidates.append(final)
+                  for pat in patterns:
+                      for match in pat.findall(body):
+                          if isinstance(match, tuple): match = next((x for x in match if x), '')
+                          if match:
+                              candidates.append(html.unescape(match).replace('\\/','/'))
+                  # Microlink JSON can bury the resolved URL in nested objects.
+                  if 'microlink' in url and body:
+                      try:
+                          obj=json.loads(body)
+                          def walk(x):
+                              if isinstance(x, dict):
+                                  for k,v in x.items():
+                                      if k.lower() in {'url','canonical','canonicalurl'} and isinstance(v,str): candidates.append(v)
+                                      walk(v)
+                              elif isinstance(x,list):
+                                  for v in x: walk(v)
+                          walk(obj)
+                      except Exception as exc:
+                          print('MICROLINK_PARSE_ERROR', exc)
+                  for c in candidates:
+                      if '/comments/' in c:
+                          print('CANDIDATE_CANONICAL=' + c)
+                          found.append(c)
+                  if body and (idx in (0,10,11,12,13)):
+                      compact = re.sub(r'\s+',' ',body[:4000])
+                      print(f'BODY_SAMPLE idx={idx}: {compact[:4000]}')
+                  if found:
+                      break
+              if found:
+                  break
+
+          canonical = next((x for x in found if '/comments/' in x), '')
+          print('RESOLVED_CANONICAL=' + canonical)
+          if not canonical:
+              sys.exit(2)
+
+          post_id_match = re.search(r'/comments/([a-z0-9]+)', canonical, re.I)
+          post_id = post_id_match.group(1) if post_id_match else ''
+          print('POST_ID=' + post_id)
+          if not post_id:
+              sys.exit(3)
+
+          json_urls = [
+              f'https://www.reddit.com/comments/{post_id}.json?raw_json=1&limit=500&depth=10',
+              f'https://old.reddit.com/comments/{post_id}.json?raw_json=1&limit=500&depth=10',
+              f'https://www.reddit.com/api/info.json?id=t3_{post_id}&raw_json=1',
+              'https://r.jina.ai/http://www.reddit.com/comments/' + post_id,
+          ]
+          raw = ''
+          for ju in json_urls:
+              req=urllib.request.Request(ju,headers={'User-Agent':user_agents[0],'Accept':'application/json,text/plain,*/*'})
+              try:
+                  with urllib.request.urlopen(req,timeout=30) as resp:
+                      raw=resp.read(10_000_000).decode('utf-8','replace')
+                      print(f'POST_FETCH status={getattr(resp,"status",None)} final={resp.geturl()} bytes={len(raw)} url={ju}')
+              except Exception as exc:
+                  raw=''
+                  if hasattr(exc,'read'):
+                      try: raw=exc.read(10_000_000).decode('utf-8','replace')
+                      except Exception: pass
+                  print(f'POST_FETCH_ERROR {type(exc).__name__}:{exc} bytes={len(raw)} url={ju}')
+              if raw.startswith('[') or raw.startswith('{'):
+                  try:
+                      data=json.loads(raw)
+                      if isinstance(data,list) and len(data)>=2:
+                          post=data[0]['data']['children'][0]['data']
+                          print('--- POST METADATA ---')
+                          for key in ('title','author','subreddit','created_utc','score','num_comments','permalink','url','link_flair_text'):
+                              print(f'{key.upper()}={post.get(key)}')
+                          print('--- POST BODY ---')
+                          print(post.get('selftext',''))
+                          print('--- END POST BODY ---')
+                          print('--- COMMENTS ---')
+                          def walk(children,depth=0):
+                              for child in children:
+                                  if child.get('kind')!='t1': continue
+                                  c=child.get('data',{})
+                                  print(f"COMMENT depth={depth} score={c.get('score')} author={c.get('author')}: {c.get('body','')}")
+                                  replies=c.get('replies')
+                                  if isinstance(replies,dict): walk(replies.get('data',{}).get('children',[]),depth+1)
+                          walk(data[1]['data']['children'])
+                          print('--- END COMMENTS ---')
+                          sys.exit(0)
+                  except Exception as exc:
+                      print('POST_JSON_PARSE_ERROR', exc)
+              if 'Title:' in raw or '# ' in raw:
+                  print('--- READER CONTENT ---')
+                  print(raw[:100000])
+                  print('--- END READER CONTENT ---')
+                  sys.exit(0)
+          print('POST_CONTENT_UNAVAILABLE')
+          sys.exit(4)
           PY
