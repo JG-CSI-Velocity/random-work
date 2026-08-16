@@ -11,119 +11,101 @@ permissions:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     steps:
-      - name: Inspect Reddit embed and resolve target
+      - name: Resolve Reddit share link with anonymous session
         shell: bash
         run: |
           set -uo pipefail
-          SHARE_URL='https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
-          EMBED_URL='https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36'
+          SHARE='https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
+          EMBED='https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
 
-          echo '=== CURL EMBED RESPONSE ==='
-          curl -A "$UA" -sS -D /tmp/embed.headers -o /tmp/embed.html "$EMBED_URL" || true
-          cat /tmp/embed.headers || true
-          wc -c /tmp/embed.html || true
+          echo '=== ESTABLISH ANONYMOUS REDDIT SESSION ==='
+          curl --http2 -A "$UA" -sS -c /tmp/reddit.cookies -D /tmp/embed.headers -o /tmp/embed.html "$EMBED" || true
+          echo 'COOKIE NAMES:'
+          awk '!/^#/ {print $6}' /tmp/reddit.cookies | sort -u || true
 
+          echo '=== COOKIE-SESSION SHORT LINK PROBES ==='
           python3 - <<'PY'
-          import html, json, pathlib, re, urllib.parse, urllib.request
-          p = pathlib.Path('/tmp/embed.html')
-          body = p.read_text(errors='replace') if p.exists() else ''
-          print('=== EMBED TITLE ===')
-          m = re.search(r'<title[^>]*>(.*?)</title>', body, re.I|re.S)
-          print(html.unescape(re.sub(r'<[^>]+>','',m.group(1))).strip() if m else 'NONE')
-          print('=== META/LINK TAGS ===')
-          for tag in re.findall(r'<(?:meta|link)\b[^>]*>', body, re.I):
-              print(tag[:2000])
-          print('=== URL-LIKE ATTRIBUTES ===')
-          seen=set()
-          for u in re.findall(r'(?:href|src|content)=["\']([^"\']+)', body, re.I):
-              u=html.unescape(u).replace('\\/','/')
-              if u not in seen:
-                  seen.add(u); print(u)
-          print('=== REDDIT/POST TOKENS ===')
-          patterns=[
-            r'https?://[^"\'<>\s]+',
-            r'/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\s]*',
-            r'/comments/[a-z0-9]+/[^"\'<>\s]*',
-            r't3_[a-z0-9]+',
-            r'"(?:postId|post_id|thingId|thing_id|permalink|canonicalUrl|canonical_url|redirect|location|targetUrl|destination)"\s*:\s*"[^"]+"',
-          ]
-          for pat in patterns:
-              for x in re.findall(pat, body, re.I):
-                  x=html.unescape(x).replace('\\/','/')
-                  if x not in seen:
-                      seen.add(x); print(x[:4000])
-          print('=== CONTEXT AROUND SHARE TOKEN ===')
-          token='ubqCGz21VM'
-          for m in re.finditer(token, body, re.I):
-              print(body[max(0,m.start()-1500):m.end()+2500])
-          print('=== CONTEXT AROUND COMMENTS/PERMALINK/POSTID ===')
-          for needle in ('/comments/','permalink','postId','thingId','canonical','redirect'):
-              for m in list(re.finditer(needle, body, re.I))[:10]:
-                  print(f'--- {needle} ---')
-                  print(body[max(0,m.start()-1000):m.end()+2000])
-          print('=== SCRIPT JSON BLOCKS ===')
-          for attrs, content in re.findall(r'<script([^>]*)>(.*?)</script>', body, re.I|re.S):
-              if content.strip() and any(k in content.lower() for k in ('comment','permalink','postid','thingid','share','reddit')):
-                  print('ATTRS',attrs[:1000])
-                  print(content[:20000])
-          print('=== PLAIN TEXT ===')
-          text=re.sub(r'<script\b[^>]*>.*?</script>',' ',body,flags=re.I|re.S)
-          text=re.sub(r'<style\b[^>]*>.*?</style>',' ',text,flags=re.I|re.S)
-          text=re.sub(r'<[^>]+>',' ',text)
-          text=html.unescape(text)
-          text=re.sub(r'\s+',' ',text).strip()
-          print(text[:30000])
-
-          print('=== OEMBED/API PROBES ===')
+          import http.cookiejar, html, pathlib, re, urllib.request
           share='https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
-          q=urllib.parse.quote(share,safe='')
-          probes=[
-            f'https://www.reddit.com/oembed?url={q}',
-            f'https://www.reddit.com/api/oembed?url={q}',
-            f'https://embed.reddit.com/oembed?url={q}',
-            f'https://www.redditmedia.com/api/oembed?url={q}',
-            'https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM?embed=true',
+          ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+          cj=http.cookiejar.MozillaCookieJar('/tmp/reddit.cookies')
+          cj.load(ignore_discard=True,ignore_expires=True)
+          opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+          variants=[
+            share,
+            share+'?context=3',
+            share+'?share_id=test&utm_content=1&utm_medium=android_app&utm_name=androidcss&utm_source=share&utm_term=1',
+            share.replace('www.reddit.com','reddit.com'),
+            share.replace('www.reddit.com','m.reddit.com'),
+            'https://oauth.reddit.com/r/ValueInvesting/s/ubqCGz21VM',
+            'https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM',
           ]
-          ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36'
-          for url in probes:
-              req=urllib.request.Request(url,headers={'User-Agent':ua,'Accept':'application/json,text/html,*/*'})
+          for url in variants:
+              headers={
+                'User-Agent':ua,
+                'Accept':'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+                'Accept-Language':'en-US,en;q=0.9',
+                'Referer':'https://embed.reddit.com/',
+                'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate','Sec-Fetch-Site':'same-site','Upgrade-Insecure-Requests':'1',
+              }
+              req=urllib.request.Request(url,headers=headers)
               try:
-                  with urllib.request.urlopen(req,timeout=20) as r:
-                      raw=r.read(1000000).decode('utf-8','replace')
-                      print('PROBE',r.status,r.geturl(),len(raw),url)
-                      print(raw[:15000])
+                  with opener.open(req,timeout=30) as r:
+                      body=r.read(1_000_000).decode('utf-8','replace')
+                      print('PROBE',r.status,'FINAL',r.geturl(),'BYTES',len(body),'URL',url)
               except Exception as e:
-                  raw=''
+                  body=''
+                  final=''
                   if hasattr(e,'read'):
-                      try: raw=e.read(1000000).decode('utf-8','replace')
+                      try: body=e.read(1_000_000).decode('utf-8','replace')
                       except Exception: pass
-                  print('PROBE_ERROR',type(e).__name__,e,len(raw),url)
-                  print(raw[:5000])
+                  if hasattr(e,'geturl'):
+                      try: final=e.geturl()
+                      except Exception: pass
+                  print('PROBE_ERROR',type(e).__name__,e,'FINAL',final,'BYTES',len(body),'URL',url)
+              candidates=[]
+              final=locals().get('final','')
+              if final: candidates.append(final)
+              for pat in [
+                r'https?://(?:www\.|old\.|new\.|np\.|m\.)?reddit\.com/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\s]+',
+                r'/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\s]+',
+                r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
+                r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']([^"\']+)',
+                r'"(?:permalink|canonicalUrl|redirect|location|targetUrl|destination)"\s*:\s*"([^"]+)"',
+              ]:
+                  for x in re.findall(pat,body,re.I):
+                      if isinstance(x,tuple): x=next((v for v in x if v),'')
+                      candidates.append(html.unescape(x).replace('\\/','/'))
+              for x in candidates:
+                  if '/comments/' in x: print('CANONICAL_CANDIDATE='+x)
+              for token in ('ubqCGz21VM','/comments/','permalink','redirect','targetUrl','thingId','postId'):
+                  for m in list(re.finditer(token,body,re.I))[:5]:
+                      print('CONTEXT',token,body[max(0,m.start()-800):m.end()+1600])
           PY
 
-          echo '=== HEADLESS CHROME EMBED ==='
-          CHROME=$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)
-          echo "CHROME=$CHROME"
-          if [ -n "$CHROME" ]; then
-            timeout 60 "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=15000 --dump-dom "$EMBED_URL" > /tmp/chrome-embed.html 2>/tmp/chrome.err || true
-            cat /tmp/chrome.err || true
-            wc -c /tmp/chrome-embed.html || true
-            python3 - <<'PY'
-          import html, pathlib, re
-          body=pathlib.Path('/tmp/chrome-embed.html').read_text(errors='replace') if pathlib.Path('/tmp/chrome-embed.html').exists() else ''
-          print('=== CHROME CANONICAL CANDIDATES ===')
-          for pat in [r'https?://[^"\'<>\s]+',r'/r/ValueInvesting/comments/[a-z0-9]+/[^"\'<>\s]*',r'/comments/[a-z0-9]+/[^"\'<>\s]*',r't3_[a-z0-9]+']:
-              for x in sorted(set(re.findall(pat,body,re.I))):
-                  if 'reddit' in x.lower() or '/comments/' in x or x.lower().startswith('t3_'):
-                      print(html.unescape(x).replace('\\/','/')[:4000])
-          text=re.sub(r'<script\b[^>]*>.*?</script>',' ',body,flags=re.I|re.S)
-          text=re.sub(r'<style\b[^>]*>.*?</style>',' ',text,flags=re.I|re.S)
-          text=re.sub(r'<[^>]+>',' ',text)
-          text=re.sub(r'\s+',' ',html.unescape(text)).strip()
-          print('=== CHROME PLAIN TEXT ===')
-          print(text[:30000])
-          PY
+          echo '=== CURL WITH COOKIE JAR, NO AUTO-REDIRECT ==='
+          for host in www.reddit.com reddit.com m.reddit.com old.reddit.com; do
+            url="https://${host}/r/ValueInvesting/s/ubqCGz21VM"
+            echo "URL=$url"
+            curl --http2 -A "$UA" -sS -b /tmp/reddit.cookies -e 'https://embed.reddit.com/' -D - -o /tmp/probe.html --max-redirs 0 "$url" || true
+            echo 'BODY SIGNALS:'
+            grep -Eio 'https?://[^"<> ]+|/r/ValueInvesting/comments/[a-z0-9]+/[^"<> ]*|/comments/[a-z0-9]+/[^"<> ]*|t3_[a-z0-9]+' /tmp/probe.html | head -100 || true
+          done
+
+          echo '=== TOKEN_V2 BEARER PROBES ==='
+          TOKEN=$(awk '$6=="token_v2" {print $7}' /tmp/reddit.cookies | tail -1)
+          echo "TOKEN_PRESENT=$([ -n "$TOKEN" ] && echo yes || echo no) TOKEN_LENGTH=${#TOKEN}"
+          if [ -n "$TOKEN" ]; then
+            for url in \
+              'https://oauth.reddit.com/r/ValueInvesting/s/ubqCGz21VM' \
+              'https://oauth.reddit.com/api/info.json?url=https%3A%2F%2Fwww.reddit.com%2Fr%2FValueInvesting%2Fs%2FubqCGz21VM' \
+              'https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'; do
+              echo "TOKEN_URL=$url"
+              curl -A "$UA" -sS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json,text/html,*/*' -D - -o /tmp/token.out "$url" || true
+              head -c 20000 /tmp/token.out || true
+              echo
+            done
           fi
