@@ -1,4 +1,4 @@
-name: Fetch KMB-KVUE Filings
+name: Fetch Kenvue Q2
 
 on:
   push:
@@ -13,48 +13,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Fetch recent SEC filings and Kenvue Q2 filing
+      - name: Discover and extract Kenvue Q2 2026 release
         shell: bash
         run: |
           set -euo pipefail
-          UA='JG-CSI-Velocity research gilmore3088@users.noreply.github.com'
-          for cik in 0001944048 0000055785; do
-            curl -A "$UA" -sS --compressed -D "/tmp/${cik}.headers" -o "/tmp/${cik}.json" "https://data.sec.gov/submissions/CIK${cik}.json"
-            echo "CIK=$cik BYTES=$(wc -c </tmp/${cik}.json)"
-            head -c 100 /tmp/${cik}.json; echo
+          UA='Mozilla/5.0 (compatible; EquityResearchValidator/1.0)'
+          for url in \
+            'https://investors.kenvue.com/financial-news/default.aspx' \
+            'https://investors.kenvue.com/financials-reports/quarterly-results/default.aspx' \
+            'https://www.kenvue.com/media'; do
+            echo "=== PAGE $url ==="
+            curl -A "$UA" -sS -L --compressed -o /tmp/page.html "$url"
+            echo "BYTES=$(wc -c </tmp/page.html)"
+            grep -Eio 'https?://[^"<> ]+|href=["'"'][^"'"']+["'"']' /tmp/page.html | grep -Ei '2026|quarter|news-details|results' | head -300 || true
+            grep -Ein -C 5 'second quarter 2026|Q2 2026|August 6, 2026|2026 results' /tmp/page.html | head -500 || true
           done
-          python3 - <<'PY'
-          import json, pathlib, subprocess, re, html
-          ua='JG-CSI-Velocity research gilmore3088@users.noreply.github.com'
-          datasets={}
-          for cik in ('0001944048','0000055785'):
-              raw=pathlib.Path(f'/tmp/{cik}.json').read_text(errors='replace')
-              data=json.loads(raw); datasets[cik]=data
-              rec=data['filings']['recent']
-              print('=== CIK',cik,data.get('name'),'===')
-              n=len(rec['form'])
-              items=rec.get('items',['']*n)
-              if len(items)<n: items=items+['']*(n-len(items))
-              for i in range(n):
-                  form=rec['form'][i]; date=rec['filingDate'][i]
-                  if date>='2026-07-01' or (form in ('10-Q','8-K') and date>='2026-05-01'):
-                      print(form,date,rec['reportDate'][i],rec['accessionNumber'][i],rec['primaryDocument'][i],items[i])
-          rec=datasets['0001944048']['filings']['recent']
-          for i,form in enumerate(rec['form']):
-              date=rec['filingDate'][i]
-              if date>='2026-08-01' and form in ('10-Q','8-K'):
-                  acc=rec['accessionNumber'][i].replace('-',''); doc=rec['primaryDocument'][i]
-                  url=f'https://www.sec.gov/Archives/edgar/data/1944048/{acc}/{doc}'
-                  out=f'/tmp/{form}-{i}.html'
-                  subprocess.run(['curl','-A',ua,'-sS','--compressed','-o',out,url],check=True)
-                  raw=pathlib.Path(out).read_text(errors='replace')
-                  text=re.sub(r'<script\b[^>]*>.*?</script>',' ',raw,flags=re.I|re.S)
-                  text=re.sub(r'<style\b[^>]*>.*?</style>',' ',text,flags=re.I|re.S)
-                  text=re.sub(r'<[^>]+>',' ',text); text=html.unescape(text); text=re.sub(r'\s+',' ',text)
-                  print('=== DOC',form,date,url,'===')
-                  for n in ['Second Quarter Summary','Net sales','Organic sales','Operating income margin','Adjusted operating income margin','Diluted earnings per share','cash provided by operating activities','long-term debt','workforce','restructuring','Tylenol','talc','product liability']:
-                      m=re.search(re.escape(n),text,re.I)
-                      if m:
-                          print('---',n,'---'); print(text[max(0,m.start()-300):m.start()+2500])
-                  print('=== FIRST 20000 ==='); print(text[:20000])
+
+          echo '=== DIRECT URL GUESSES ==='
+          guesses=(
+            'https://investors.kenvue.com/financial-news/news-details/2026/Kenvue-Reports-Second-Quarter-2026-Results/default.aspx'
+            'https://investors.kenvue.com/financial-news/news-details/2026/Kenvue-Reports-Second-Quarter-2026-Results-1/default.aspx'
+            'https://www.kenvue.com/media/kenvue-reports-second-quarter-2026-results'
+            'https://www.kenvue.com/media/kenvue-reports-second-quarter-2026-results-1'
+          )
+          for url in "${guesses[@]}"; do
+            code=$(curl -A "$UA" -sS -L --compressed -o /tmp/guess.html -w '%{http_code}' "$url")
+            title=$(grep -io '<title[^>]*>[^<]*' /tmp/guess.html | head -1 | sed -E 's/<title[^>]*>//I')
+            echo "CODE=$code BYTES=$(wc -c </tmp/guess.html) TITLE=$title URL=$url"
+            if grep -qi 'Net Sales' /tmp/guess.html && grep -qi '2026' /tmp/guess.html; then
+              python3 - "$url" <<'PY'
+          import html,re,pathlib,sys
+          url=sys.argv[1]; raw=pathlib.Path('/tmp/guess.html').read_text(errors='replace')
+          text=re.sub(r'<script\b[^>]*>.*?</script>',' ',raw,flags=re.I|re.S)
+          text=re.sub(r'<style\b[^>]*>.*?</style>',' ',text,flags=re.I|re.S)
+          text=re.sub(r'<[^>]+>',' ',text); text=html.unescape(text); text=re.sub(r'\s+',' ',text).strip()
+          print('FOUND_URL='+url)
+          print(text[:60000])
           PY
+            fi
+          done
