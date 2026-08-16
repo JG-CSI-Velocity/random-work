@@ -1,0 +1,78 @@
+name: Resolve Reddit Share
+
+on:
+  push:
+    branches:
+      - research-url-resolver
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve Reddit share link and print thesis
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHARE_URL='https://www.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
+          UA='Mozilla/5.0 (compatible; EquityResearchResolver/1.0; +https://github.com/JG-CSI-Velocity/random-work)'
+
+          FINAL_URL=$(curl -A "$UA" -sS -L --max-redirs 10 -o /tmp/reddit.html -w '%{url_effective}' "$SHARE_URL")
+          echo "FINAL_URL=$FINAL_URL"
+          echo '--- REDIRECT HEADERS ---'
+          curl -A "$UA" -sS -I -L --max-redirs 10 "$SHARE_URL" || true
+          echo '--- END REDIRECT HEADERS ---'
+
+          POST_ID=$(printf '%s' "$FINAL_URL" | sed -nE 's#.*?/comments/([a-z0-9]+)/.*#\1#p')
+          echo "POST_ID=$POST_ID"
+          if [ -z "$POST_ID" ]; then
+            echo 'Could not extract a Reddit post ID.'
+            echo '--- HTML HEAD ---'
+            head -c 10000 /tmp/reddit.html || true
+            exit 1
+          fi
+
+          JSON_URL="https://www.reddit.com/comments/${POST_ID}.json?raw_json=1&limit=500&depth=10"
+          HTTP_CODE=$(curl -A "$UA" -sS -L -o /tmp/post.json -w '%{http_code}' "$JSON_URL")
+          echo "JSON_URL=$JSON_URL"
+          echo "JSON_HTTP_CODE=$HTTP_CODE"
+
+          python3 - <<'PY'
+          import json, pathlib, sys
+          path = pathlib.Path('/tmp/post.json')
+          raw = path.read_text(errors='replace') if path.exists() else ''
+          print('--- JSON PREVIEW ---')
+          print(raw[:2000])
+          print('--- END JSON PREVIEW ---')
+          try:
+              data = json.loads(raw)
+          except Exception as exc:
+              print(f'JSON_PARSE_ERROR={exc}')
+              sys.exit(1)
+
+          post = data[0]['data']['children'][0]['data']
+          print('--- POST METADATA ---')
+          for key in ('title','author','subreddit','created_utc','score','num_comments','permalink','url','link_flair_text'):
+              print(f'{key.upper()}={post.get(key)}')
+          print('--- POST BODY ---')
+          print(post.get('selftext',''))
+          print('--- END POST BODY ---')
+
+          print('--- TOP-LEVEL COMMENTS ---')
+          comments = data[1]['data']['children']
+          def walk(children, depth=0):
+              for child in children:
+                  if child.get('kind') != 't1':
+                      continue
+                  c = child.get('data', {})
+                  body = c.get('body', '')
+                  print(f"COMMENT depth={depth} score={c.get('score')} author={c.get('author')}: {body}")
+                  replies = c.get('replies')
+                  if isinstance(replies, dict):
+                      walk(replies.get('data', {}).get('children', []), depth+1)
+          walk(comments)
+          print('--- END COMMENTS ---')
+          PY
