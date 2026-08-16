@@ -1,4 +1,4 @@
-name: Fetch Reddit Thesis
+name: Fetch KMB-KVUE Filings
 
 on:
   push:
@@ -13,67 +13,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - name: Fetch Kimberly-Clark thesis and comments through Reddit OAuth
+      - name: Fetch recent SEC filings and Kenvue Q2 filing
         shell: bash
         run: |
           set -euo pipefail
-          UA='Mozilla/5.0 (compatible; EquityResearchValidator/1.0; +https://github.com/JG-CSI-Velocity/random-work)'
-          EMBED='https://embed.reddit.com/r/ValueInvesting/s/ubqCGz21VM'
-          POST_ID='1vphizq'
-
-          curl --http2 -A "$UA" -sS -c /tmp/reddit.cookies -o /tmp/embed.html "$EMBED"
-          TOKEN=$(awk '$6=="token_v2" {print $7}' /tmp/reddit.cookies | tail -1)
-          echo "TOKEN_PRESENT=$([ -n "$TOKEN" ] && echo yes || echo no) TOKEN_LENGTH=${#TOKEN}"
-          test -n "$TOKEN"
-
-          for endpoint in \
-            "https://oauth.reddit.com/comments/${POST_ID}?raw_json=1&limit=500&depth=10&sort=confidence" \
-            "https://oauth.reddit.com/api/info?id=t3_${POST_ID}&raw_json=1"; do
-            echo "FETCH_ENDPOINT=$endpoint"
-            code=$(curl -A "$UA" -sS -H "Authorization: Bearer $TOKEN" -H 'Accept: application/json' -o /tmp/reddit-response.json -w '%{http_code}' "$endpoint")
-            echo "HTTP_CODE=$code BYTES=$(wc -c </tmp/reddit-response.json)"
-            if [ "$code" = "200" ]; then
-              cp /tmp/reddit-response.json /tmp/post.json
-              break
-            fi
-          done
-
+          UA='JG-CSI-Velocity equityresearch@example.com'
           python3 - <<'PY'
-          import json, pathlib, sys, datetime
-          raw=pathlib.Path('/tmp/post.json').read_text(errors='replace')
-          data=json.loads(raw)
-          print('JSON_TOP_TYPE',type(data).__name__)
-          if isinstance(data,list) and len(data)>=2:
-              post=data[0]['data']['children'][0]['data']
-              comments=data[1]['data']['children']
-          elif isinstance(data,dict):
-              children=data.get('data',{}).get('children',[])
-              if not children: raise RuntimeError('No post children')
-              post=children[0]['data']; comments=[]
-          else:
-              raise RuntimeError('Unexpected Reddit response')
-          print('=== POST METADATA ===')
-          for key in ('title','author','subreddit','created_utc','score','upvote_ratio','num_comments','permalink','url','link_flair_text','edited'):
-              val=post.get(key)
-              if key=='created_utc' and val:
-                  val=f"{val} ({datetime.datetime.fromtimestamp(val,datetime.timezone.utc).isoformat()})"
-              print(f'{key.upper()}={val}')
-          print('=== POST BODY ===')
-          print(post.get('selftext',''))
-          print('=== END POST BODY ===')
-          print('=== COMMENTS BY SCORE ===')
-          flat=[]
-          def walk(children,depth=0):
-              for child in children:
-                  if child.get('kind')!='t1': continue
-                  c=child.get('data',{})
-                  flat.append((c.get('score') or 0,depth,c.get('author'),c.get('created_utc'),c.get('body',''),c.get('permalink')))
-                  replies=c.get('replies')
-                  if isinstance(replies,dict): walk(replies.get('data',{}).get('children',[]),depth+1)
-          walk(comments)
-          for score,depth,author,created,body,permalink in sorted(flat,key=lambda x:x[0],reverse=True):
-              print(f'COMMENT score={score} depth={depth} author={author} permalink={permalink}')
-              print(body)
-              print('---')
-          print('TOTAL_COMMENTS_FETCHED',len(flat))
+          import json, urllib.request, re, html, sys
+          ua='JG-CSI-Velocity equityresearch@example.com'
+          def get(url):
+              req=urllib.request.Request(url,headers={'User-Agent':ua,'Accept-Encoding':'gzip, deflate','Host':urllib.parse.urlparse(url).netloc})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  return r.read().decode('utf-8','replace')
+          import urllib.parse
+          for cik in ('0001944048','0000055785'):
+              url=f'https://data.sec.gov/submissions/CIK{cik}.json'
+              raw=get(url); data=json.loads(raw)
+              rec=data['filings']['recent']
+              print('=== CIK',cik,data.get('name'),'===')
+              for i,(form,date,report,acc,doc,items) in enumerate(zip(rec['form'],rec['filingDate'],rec['reportDate'],rec['accessionNumber'],rec['primaryDocument'],rec.get('items',['']*len(rec['form'])))):
+                  if date>='2026-07-01' or (form in ('10-Q','8-K') and date>='2026-05-01'):
+                      print(form,date,report,acc,doc,items)
+          # Fetch likely Kenvue Q2 10-Q and 8-K documents from recent list
+          cik='0001944048'; data=json.loads(get(f'https://data.sec.gov/submissions/CIK{cik}.json')); rec=data['filings']['recent']
+          for i,form in enumerate(rec['form']):
+              date=rec['filingDate'][i]
+              if date>='2026-08-01' and form in ('10-Q','8-K'):
+                  acc=rec['accessionNumber'][i].replace('-',''); doc=rec['primaryDocument'][i]
+                  url=f'https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/{doc}'
+                  raw=get(url)
+                  text=re.sub(r'<script\b[^>]*>.*?</script>',' ',raw,flags=re.I|re.S)
+                  text=re.sub(r'<style\b[^>]*>.*?</style>',' ',text,flags=re.I|re.S)
+                  text=re.sub(r'<[^>]+>',' ',text)
+                  text=html.unescape(text); text=re.sub(r'\s+',' ',text)
+                  print('=== DOC',form,date,url,'===')
+                  # print targeted contexts
+                  needles=['Second Quarter Summary','Net sales','Organic sales','Operating income margin','Adjusted operating income margin','Diluted earnings per share','cash provided by operating activities','long-term debt','workforce','restructuring','Tylenol','talc']
+                  for n in needles:
+                      m=re.search(re.escape(n),text,re.I)
+                      if m:
+                          print('---',n,'---')
+                          print(text[max(0,m.start()-500):m.start()+3500])
+                  print('=== FIRST 30000 ===')
+                  print(text[:30000])
           PY
